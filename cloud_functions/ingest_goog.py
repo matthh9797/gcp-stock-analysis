@@ -1,8 +1,11 @@
+import argparse
 import os
 import logging
+from yaml import parse
 import yfinance as yf
 import tempfile  # Used to create temporary directories/files
 import shutil
+import datetime
 
 from google.cloud import storage
 from google.cloud.storage import Blob
@@ -26,10 +29,10 @@ def download(date: str, destdir: str, full_refresh: bool):
         history.to_csv(filename, index=False)
         logging.debug("{} saved".format(filename))
         return filename
+    # If day is not a trading day, the date will not exist
     except KeyError:
         s = "{} is not a trading day".format(date)
         logging.info(s)
-        print(s)
         return None
 
 
@@ -94,18 +97,89 @@ def ingest(date: str, bucket: str, full_refresh=False):
     """
     tempdir = tempfile.mkdtemp(prefix="ingest_stocks")
     try:
-        file = download(date, "repository", full_refresh=full_refresh)
-        if file is not None:
+        file = download(date, tempdir, full_refresh=full_refresh)
+        if file is None:
+            pass
+        else:
             gcsloc = "stocks/raw/goog/{}.csv".format(date)
             gcsloc = upload(file, bucket, gcsloc)
             return bqload(gcsloc, full_refresh=full_refresh)
-
     finally:
         logging.debug("Cleaning up by removing {}".format(tempdir))
         shutil.rmtree(tempdir)
 
 
-def next_date():
-    """Get next day from bucket"""
-    pass
+def compute_next_month(date):
+    dt = datetime.datetime.strptime(date, "%Y-%m-%d")
+    dt = dt + datetime.timedelta(1)
+    logging.debug("The next date is {}".format(dt))
+    return dt.strftime("%Y-%m-%d")
 
+
+def next_date(bucketname: str):
+    """ 
+    Finds which dates exist in GCP and returns the next date to download
+    """
+    client = storage.Client()
+    bucket = client.get_bucket(bucketname)
+    blobs = list(bucket.list_blobs(prefix="stocks/raw/goog/"))
+    files = [blob.name for blob in blobs if "csv" in blob.name]
+    lastfile = os.path.basename(files[-1])
+    logging.debug("The latest file on GCS is {}".format(lastfile))
+    date = os.path.splitext(lastfile)[0]
+    return compute_next_month(date)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Ingest ticker data from yahoo finance in BigQuery"
+    )
+    parser.add_argument("--bucket", help="GCS bucket to upload to", required=True)
+    parser.add_argument(
+        "--date",
+        help="Example: 2020-01-01. If not provided, defaults to getting next month",
+    )
+    parser.add_argument(
+        "--full_refresh", help="Fully refresh all data in table. Defaults to False",
+    )
+    parser.add_argument(
+        "--debug",
+        dest="debug",
+        action="store_true",
+        help="Specify if you want debug messages",
+    )
+
+    try:
+        args = parser.parse_args()
+        if args.debug:
+            logging.basicConfig(
+                format="%(levelname)s: %(message)s", level=logging.DEBUG
+            )
+        else:
+            logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
+        if args.full_refresh is None:
+            full_refresh = False
+        else:
+            full_refresh = args.full_refresh
+
+        if args.date is None:
+            # _ to avoid conflicts with python keywords
+            date_ = next_date(args.bucket)
+        else:
+            date_ = args.date
+
+            logging.debug("Ingesting date={}".format(date_))
+            try:
+                tableref, numrows = ingest(
+                    date_, args.bucket, full_refresh=full_refresh
+                )
+                logging.info(
+                    "Success ... ingested {} rows to {}".format(numrows, tableref)
+                )
+            except TypeError:
+                pass
+    except Exception as e:
+        logging.exception("Try again later?")
