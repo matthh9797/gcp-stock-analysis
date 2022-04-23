@@ -10,7 +10,7 @@ app = Flask(__name__)
 # App will only respond to POST requests (i.e. the json payload of arguements we invoke it with)
 @app.route("/", methods=["POST"])
 # Function will be run when app is invoked
-def ingest_goog():
+def ingest_goog(request):
     try:
         logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
         # Get json payload from POST request
